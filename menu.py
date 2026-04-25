@@ -8,11 +8,14 @@ Contains:
   - Key input primitives   (get_key, get_key_with_shift)
   - Menu rendering         (display_menu, arrow_menu)
   - Data helpers           (read_data, save_data)
+  - Session management     (sync_sessions, attach_session, new_session, delete_session)
 """
 
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -209,11 +212,223 @@ def arrow_menu(title: str, options: list[str]) -> int | None:
 
         display_menu(title, options, selected)
 
+
+# Session management helpers
+
+def get_tmux_sessions() -> list[str]:
+    """Return a list of currently active tmux session names.
+
+    Returns:
+        List of session name strings, or empty list if tmux has no sessions
+        or is not running.
+    """
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def sync_sessions(data: list) -> list:
+    """Sync data.json against live tmux sessions.
+
+    - Adds entries for tmux sessions not already tracked (using the tmux name
+      as both the key and display name).
+    - Removes entries whose tmux session no longer exists.
+
+    Args:
+        data: Current list of single-key dicts from data.json.
+
+    Returns:
+        Updated list.
+    """
+    live = set(get_tmux_sessions())
+    tracked = {list(entry.keys())[0]: list(entry.values())[0] for entry in data}
+
+    # Drop sessions that are no longer alive
+    synced = {k: v for k, v in tracked.items() if k in live}
+
+    # Add sessions that tmux knows about but we don't
+    for session_name in live:
+        if session_name not in synced:
+            synced[session_name] = session_name
+
+    return [{k: v} for k, v in synced.items()]
+
+
+def prompt_input(prompt: str) -> str:
+    """Display a prompt and read a line of input with the terminal in normal mode.
+
+    Args:
+        prompt: Text to display before the cursor.
+
+    Returns:
+        The stripped string the user typed.
+    """
+    print(prompt, end="", flush=True)
+    return input()
+
+
+# Sub-menus
+
+def attach_session(data: list) -> None:
+    """Show a list of tracked sessions and attach to the chosen one."""
+    if not data:
+        print("\n  No sessions available.\n")
+        time.sleep(1)
+        return
+
+    display_names = [list(entry.values())[0] for entry in data]
+    tmux_names    = [list(entry.keys())[0]   for entry in data]
+    options = display_names + ["← Back"]
+
+    choice = arrow_menu("Attach Session", options)
+
+    if choice is None or choice == len(display_names):
+        return  # Esc or Back
+
+    tmux_name = tmux_names[choice]
+    os.execvp("tmux", ["tmux", "attach", "-t", tmux_name])
+
+
+def new_session(data: list) -> list:
+    """Prompt for names, create a new tmux session, and return the updated data.
+
+    Args:
+        data: Current session list.
+
+    Returns:
+        Updated session list with the new entry appended.
+    """
+    print()
+    tmux_name    = prompt_input("  Tmux session name   : ").strip()
+    display_name = prompt_input("  Display name        : ").strip()
+
+    if not tmux_name:
+        print("\n  Aborted - session name cannot be empty.\n")
+        time.sleep(1.2)
+        return data
+
+    if not display_name:
+        display_name = tmux_name
+
+    # Persist before launching so the entry is saved even if attach fails
+    data.append({tmux_name: display_name})
+    save_data(data)
+
+    print("\n  Press Ctrl+B, then D to detach.\n")
+    time.sleep(2)
+
+    os.execvp("tmux", ["tmux", "new", "-s", tmux_name])
+
+    # os.execvp replaces the process; the lines below are never reached
+    return data  # pragma: no cover
+
+
+def delete_session(data: list) -> list:
+    """Show a list of sessions, kill the chosen one, and return updated data.
+
+    Args:
+        data: Current session list.
+
+    Returns:
+        Updated session list with the deleted entry removed.
+    """
+    if not data:
+        print("\n  No sessions to delete.\n")
+        time.sleep(1)
+        return data
+
+    display_names = [list(entry.values())[0] for entry in data]
+    tmux_names    = [list(entry.keys())[0]   for entry in data]
+    options = display_names + ["← Back"]
+
+    choice = arrow_menu("Delete Session", options)
+
+    if choice is None or choice == len(display_names):
+        return data  # Esc or Back
+
+    tmux_name    = tmux_names[choice]
+    display_name = display_names[choice]
+
+    result = subprocess.run(
+        ["tmux", "kill-session", "-t", tmux_name],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        print(f"\n  Deleted '{display_name}'.\n")
+    else:
+        print(f"\n  Could not kill '{tmux_name}': {result.stderr.strip()}\n")
+
+    time.sleep(1)
+
+    updated = [e for e in data if list(e.keys())[0] != tmux_name]
+    save_data(updated)
+    return updated
+
+
 # Main entry point
+
 def main():
-    print("Session data path:", SESSION_DATA_PATH)
-    data = read_data()
-    print("Loaded:", data)
+    data = read_data() or []
+    data = sync_sessions(data)
+    save_data(data)
+
+    main_options = ["Attach Session", "New Session", "Delete Session", "Exit"]
+
+    while True:
+        print()
+        choice = arrow_menu("Tmux Session Manager", main_options)
+
+        if choice is None or choice == 3:   # Esc or Exit
+            print("\n  Goodbye.\n")
+            sys.exit(0)
+
+        elif choice == 0:  # Attach Session
+            attach_session(data)
+
+        elif choice == 1:  # New Session
+            data = new_session(data)
+
+        elif choice == 2:  # Delete Session
+            data = delete_session(data)
+
+        # Re-sync after returning from any sub-menu (attach replaces the
+        # process, so we only get here from new/delete or if attach failed)
+        data = sync_sessions(data)
+        save_data(data)
+
 
 if __name__ == "__main__":
     main()
+
+# LOGIC FLOW:
+# - Update data.json by running tmux list-sessions and adding sessions not in dat.json and deleting sessions not listed in output
+# - Display menu; options:
+#   - "Attach Session"
+#   - "New Session"
+#   - "Delete Session"
+#   - "Exit"
+# - on "Attach Session":
+#   - List sessions from data.json (use display name)
+#   - On select, run `tmux attach -t <tmux session name>`
+#   - On selecting "Exit", go back to main menu
+# - on "New Session":
+#   - Ask for session name and display name
+#   - Save to data.json
+#   - Display message "Press Ctrl + B, then D to detach." for 2 seconds
+#   - run `tmux new -s <tmux session name>`
+#   - On selecting "Exit", go back to main menu
+# - on "Delete Session":
+#   - List sessions from data.json
+#   - On select, run `tmux kill-session -t <tmux session name>`
+# - on "Exit"
+#   - Exit app
