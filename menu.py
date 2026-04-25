@@ -195,6 +195,10 @@ def arrow_menu(title: str, options: list[str]) -> int | None:
     Returns:
         The zero-based index of the selected option, or None if Esc was pressed.
     """
+    # Clear the screen so this menu overwrites whatever was shown before
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
     selected = 0
     display_menu(title, options, selected, first_draw=True)
 
@@ -385,7 +389,6 @@ def main():
     main_options = ["Attach Session", "New Session", "Delete Session", "Exit"]
 
     while True:
-        print()
         choice = arrow_menu("Tmux Session Manager", main_options)
 
         if choice is None or choice == 3:   # Esc or Exit
