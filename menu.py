@@ -341,6 +341,7 @@ def create_persistent_session(
         "\n"
         f"{venv_command}\n"
         "\n"
+        "clear\n"
         f"exec {startup_command}\n",
         encoding="utf-8",
     )
