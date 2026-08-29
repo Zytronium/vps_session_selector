@@ -301,8 +301,75 @@ def attach_session(data: list) -> None:
     os.execvp("tmux", ["tmux", "attach", "-t", tmux_name])
 
 
+def shell_quote(value: str) -> str:
+    """Return a shell-safe single-quoted string."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def create_persistent_session(
+    tmux_name: str,
+    display_name: str,
+    working_directory: str,
+    venv_command: str,
+    startup_command: str,
+) -> None:
+    """Create configuration and systemd startup files for a persistent tmux session."""
+
+    config_dir = Path("/root/sessions/config")
+    start_dir = Path("/root/sessions/start")
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    start_dir.mkdir(parents=True, exist_ok=True)
+
+    config_file = config_dir / f"{tmux_name}.conf"
+    start_script = start_dir / f"{tmux_name}.sh"
+
+    # Configuration consumed by start-session.sh
+    config_file.write_text(
+        f"SESSION_NAME={shell_quote(tmux_name)}\n"
+        f"WORKING_DIRECTORY={shell_quote(working_directory)}\n"
+        f"START_SCRIPT={shell_quote(str(start_script))}\n",
+        encoding="utf-8",
+    )
+
+    # Startup script executed inside tmux
+    start_script.write_text(
+        "#!/bin/bash\n"
+        "set -e\n"
+        "\n"
+        f"cd {shell_quote(working_directory)}\n"
+        "\n"
+        f"{venv_command}\n"
+        "\n"
+        f"exec {startup_command}\n",
+        encoding="utf-8",
+    )
+
+    start_script.chmod(0o755)
+
+    # Escape the session name for use as a systemd template instance.
+    result = subprocess.run(
+        ["systemd-escape", "--template=tmux-persistent@.service", tmux_name],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    service_name = result.stdout.strip()
+
+    subprocess.run(
+        ["systemctl", "daemon-reload"],
+        check=True,
+    )
+
+    subprocess.run(
+        ["systemctl", "enable", "--now", service_name],
+        check=True,
+    )
+
+
 def new_session(data: list) -> list:
-    """Prompt for names, create a new tmux session, and return the updated data.
+    """Prompt for a persistent tmux session and create it.
 
     Args:
         data: Current session list.
@@ -310,9 +377,14 @@ def new_session(data: list) -> list:
     Returns:
         Updated session list with the new entry appended.
     """
+
     print()
-    tmux_name    = prompt_input("  Tmux session name   : ").strip()
+
+    tmux_name = prompt_input("  Tmux session name   : ").strip()
     display_name = prompt_input("  Display name        : ").strip()
+    working_directory = prompt_input("  Working directory   : ").strip()
+    venv_command = prompt_input("  Venv activation     : ").strip()
+    startup_command = prompt_input("  Startup command     : ").strip()
 
     if not tmux_name:
         print("\n  Aborted - session name cannot be empty.\n")
@@ -322,17 +394,42 @@ def new_session(data: list) -> list:
     if not display_name:
         display_name = tmux_name
 
-    # Persist before launching so the entry is saved even if attach fails
+    if not working_directory:
+        print("\n  Aborted - working directory cannot be empty.\n")
+        time.sleep(1.2)
+        return data
+
+    if not startup_command:
+        print("\n  Aborted - startup command cannot be empty.\n")
+        time.sleep(1.2)
+        return data
+
+    if tmux_name in get_tmux_sessions():
+        print(f"\n  Aborted - tmux session '{tmux_name}' already exists.\n")
+        time.sleep(1.2)
+        return data
+
+    try:
+        create_persistent_session(
+            tmux_name=tmux_name,
+            display_name=display_name,
+            working_directory=working_directory,
+            venv_command=venv_command,
+            startup_command=startup_command,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"\n  Could not create systemd service: {e}\n")
+        time.sleep(2)
+        return data
+
     data.append({tmux_name: display_name})
     save_data(data)
 
-    print("\n  Press Ctrl+B, then D to detach.\n")
+    print(f"\n  Created persistent session '{display_name}'.")
+    print("  It will automatically restart after a reboot or crash.\n")
     time.sleep(2)
 
-    os.execvp("tmux", ["tmux", "new", "-s", tmux_name])
-
-    # os.execvp replaces the process; the lines below are never reached
-    return data  # pragma: no cover
+    return data
 
 
 def delete_session(data: list) -> list:
