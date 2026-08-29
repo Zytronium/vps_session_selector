@@ -434,13 +434,11 @@ def new_session(data: list) -> list:
 
 
 def delete_session(data: list) -> list:
-    """Show a list of sessions, kill the chosen one, and return updated data.
+    """Permanently delete a persistent tmux session.
 
-    Args:
-        data: Current session list.
-
-    Returns:
-        Updated session list with the deleted entry removed.
+    Stops and disables its systemd service, kills the tmux session,
+    removes its persistent configuration/startup files, and removes
+    the session from data.json.
     """
     if not data:
         print("\n  No sessions to delete.\n")
@@ -459,16 +457,51 @@ def delete_session(data: list) -> list:
     tmux_name    = tmux_names[choice]
     display_name = display_names[choice]
 
-    result = subprocess.run(
-        ["tmux", "kill-session", "-t", tmux_name],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        # Determine the systemd service name using the same escaping
+        # mechanism used when creating the service.
+        result = subprocess.run(
+            [
+                "systemd-escape",
+                "--template=tmux-persistent@.service",
+                tmux_name,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        service_name = result.stdout.strip()
 
-    if result.returncode == 0:
-        print(f"\n  Deleted '{display_name}'.\n")
-    else:
-        print(f"\n  Could not kill '{tmux_name}': {result.stderr.strip()}\n")
+        # Stop and disable the persistent service first. This prevents
+        # systemd from recreating the tmux session after we kill it.
+        subprocess.run(
+            ["systemctl", "disable", "--now", service_name],
+            check=True,
+        )
+
+        # Kill the tmux session if it still exists.
+        subprocess.run(
+            ["tmux", "kill-session", "-t", tmux_name],
+            capture_output=True,
+            text=True,
+        )
+
+        # Remove the generated persistence files.
+        config_file = Path("/root/sessions/config") / f"{tmux_name}.conf"
+        start_script = Path("/root/sessions/start") / f"{tmux_name}.sh"
+
+        config_file.unlink(missing_ok=True)
+        start_script.unlink(missing_ok=True)
+
+        print(f"\n  Deleted persistent session '{display_name}'.\n")
+
+    except subprocess.CalledProcessError as e:
+        print(
+            f"\n  Could not delete '{display_name}': "
+            f"{e.stderr.strip() if e.stderr else e}\n"
+        )
+        time.sleep(2)
+        return data
 
     time.sleep(1)
 
