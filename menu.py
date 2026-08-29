@@ -315,8 +315,8 @@ def create_persistent_session(
 ) -> None:
     """Create configuration and systemd startup files for a persistent tmux session."""
 
-    config_dir = Path("/root/sessions/config")
-    start_dir = Path("/root/sessions/start")
+    config_dir = Path("/etc/tmux-persistent/config")
+    start_dir = Path("/etc/tmux-persistent/start")
 
     config_dir.mkdir(parents=True, exist_ok=True)
     start_dir.mkdir(parents=True, exist_ok=True)
@@ -487,8 +487,8 @@ def delete_session(data: list) -> list:
         )
 
         # Remove the generated persistence files.
-        config_file = Path("/root/sessions/config") / f"{tmux_name}.conf"
-        start_script = Path("/root/sessions/start") / f"{tmux_name}.sh"
+        config_file = Path("/etc/tmux-persistent/config") / f"{tmux_name}.conf"
+        start_script = Path("/etc/tmux-persistent/start") / f"{tmux_name}.sh"
 
         config_file.unlink(missing_ok=True)
         start_script.unlink(missing_ok=True)
